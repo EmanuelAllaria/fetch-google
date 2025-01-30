@@ -1,142 +1,106 @@
-import requests
 import csv
 import time
+import requests
+import mysql.connector
+from datetime import datetime
+import schedule
 
-# Tu clave de API de Google Maps
-API_KEY = "AIzaSyDIzpr-nfRkt--htgdQNnOwvXM4o2rkksk"
+# Configuración
+API_KEY = "AIzaSyDIzpr-nfRkt--htgdQNnOwvXM4o2rkksk"  # Reemplázalo con una API Key segura
+LIMIT = 100  # Cantidad de localidades por ejecución
+BUSQUEDA = "repuestos de motos"  # Cambia esto cuando termines con una categoría
 
-# Diccionario de provincias argentinas y sus principales ciudades
-provincias_ciudades = {
-    "Buenos Aires": ["La Plata", "Mar del Plata", "Bahía Blanca", "Tandil", "Luján"],
-    "Catamarca": ["San Fernando del Valle de Catamarca", "Belén", "Tinogasta", "Santa María"],
-    "Chaco": ["Resistencia", "Presidencia Roque Sáenz Peña", "Villa Ángela", "Charata"],
-    "Chubut": ["Rawson", "Trelew", "Puerto Madryn", "Esquel", "Comodoro Rivadavia"],
-    "Córdoba": ["Córdoba", "Villa Carlos Paz", "Río Cuarto", "Villa María", "San Francisco"],
-    "Corrientes": ["Corrientes", "Goya", "Mercedes", "Paso de los Libres", "Curuzú Cuatiá"],
-    "Entre Ríos": ["Paraná", "Concordia", "Gualeguaychú", "Gualeguay", "Colón"],
-    "Formosa": ["Formosa", "Clorinda", "Pirané", "El Colorado", "Laguna Blanca"],
-    "Jujuy": ["San Salvador de Jujuy", "Palpalá", "Perico", "Libertador General San Martín", "Tilcara"],
-    "La Pampa": ["Santa Rosa", "General Pico", "Toay", "Victorica", "Macachín"],
-    "La Rioja": ["La Rioja", "Chilecito", "Chamical", "Aimogasta", "Villa Unión"],
-    "Mendoza": ["Mendoza", "San Rafael", "Godoy Cruz", "Luján de Cuyo", "Maipú"],
-    "Misiones": ["Posadas", "Oberá", "Eldorado", "Puerto Iguazú", "Leandro N. Alem"],
-    "Neuquén": ["Neuquén", "San Martín de los Andes", "Zapala", "Plottier", "Centenario"],
-    "Río Negro": ["Viedma", "San Carlos de Bariloche", "General Roca", "Cipolletti", "Villa Regina"],
-    "Salta": ["Salta", "Tartagal", "Orán", "Rosario de la Frontera", "Cafayate"],
-    "San Juan": ["San Juan", "Rawson", "Chimbas", "Rivadavia", "Pocito"],
-    "San Luis": ["San Luis", "Villa Mercedes", "Merlo", "La Punta", "Juana Koslay"],
-    "Santa Cruz": ["Río Gallegos", "Caleta Olivia", "El Calafate", "Pico Truncado", "Puerto Deseado"],
-    "Santa Fe": ["Santa Fe", "Rosario", "Rafaela", "Venado Tuerto", "Reconquista"],
-    "Santiago del Estero": ["Santiago del Estero", "La Banda", "Termas de Río Hondo", "Frías", "Añatuya"],
-    "Tierra del Fuego": ["Ushuaia", "Río Grande", "Tolhuin"],
-    "Tucumán": ["San Miguel de Tucumán", "Tafí Viejo", "Concepción", "Yerba Buena", "Banda del Río Salí"]
-}
+# Conexión a MySQL
+def conectar_db():
+    try:
+        conn = mysql.connector.connect(
+            host="localhost",
+            user="root",
+            password="",
+            database="scraping"
+        )
+        return conn
+    except mysql.connector.Error as err:
+        print(f"Error de conexión: {err}")
+        return None
 
-# Parámetros de búsqueda
-# query = "repuestos gomerias"
-query = "gomerias"
-url_textsearch = "https://maps.googleapis.com/maps/api/place/textsearch/json"
-url_details = "https://maps.googleapis.com/maps/api/place/details/json"
+def obtener_localidades(conn):
+    cursor = conn.cursor(dictionary=True)
+    query = "SELECT id, provincia, localidad FROM localidades WHERE procesado = 0 LIMIT %s"
+    cursor.execute(query, (LIMIT,))
+    localidades = cursor.fetchall()
+    cursor.close()
+    return localidades
 
-# Archivo de salida
-# output_file = "repuestos_motos_argentina.csv"
-output_file = "gomerias_argentina.csv"
+def buscar_repuestos(localidad, provincia, api_key, busqueda):
+    query = f"{busqueda} {localidad} {provincia}"
+    url = f"https://maps.googleapis.com/maps/api/place/textsearch/json?query={query}&key={api_key}&language=es&region=AR"
+    response = requests.get(url)
+    if response.status_code != 200:
+        print(f"❌ Error en la solicitud: {response.status_code}")
+        return []
+    return response.json().get("results", [])
 
-# Lista para evitar duplicados
-processed_place_ids = set()
+def obtener_detalles(place_id, api_key):
+    url = f"https://maps.googleapis.com/maps/api/place/details/json?place_id={place_id}&fields=name,formatted_phone_number,formatted_address,website,email,opening_hours,rating&key={api_key}&language=es"
+    response = requests.get(url)
+    if response.status_code != 200:
+        print(f"❌ Error en la solicitud: {response.status_code}")
+        return {}
+    return response.json().get("result", {})
 
-# Crear o limpiar el archivo CSV
-with open(output_file, mode="w", newline="", encoding="utf-8") as file:
-    writer = csv.writer(file)
-    writer.writerow(["Provincia", "Ciudad", "Nombre del Lugar", "Ubicación", "Teléfono"])
-
-def fetch_places(query, city, page_token=None):
-    """Obtiene lugares para una ciudad específica."""
-    params = {
-        "query": f"{query} en {city}",
-        "key": API_KEY
-    }
-    if page_token:
-        params["pagetoken"] = page_token
-
-    response = requests.get(url_textsearch, params=params)
-    response_data = response.json()
-    return response_data
-
-def fetch_place_details(place_id):
-    """Obtiene detalles de un lugar usando su place_id."""
-    params = {
-        "place_id": place_id,
-        "fields": "name,formatted_phone_number,formatted_address",
-        "key": API_KEY
-    }
-
-    response = requests.get(url_details, params=params)
-    response_data = response.json()
-    return response_data
-
-def save_to_csv(provincia, city, name, address, phone):
-    """Guarda los datos en un archivo CSV."""
-    with open(output_file, mode="a", newline="", encoding="utf-8") as file:
+def procesar_localidades():
+    conn = conectar_db()
+    if not conn:
+        return
+    
+    localidades = obtener_localidades(conn)
+    if not localidades:
+        print("❌ No hay más localidades pendientes.")
+        conn.close()
+        return
+    
+    output_csv = "repuestos_motos_corregido.csv"
+    with open(output_csv, "a", newline="", encoding="utf-8") as file:
         writer = csv.writer(file)
-        writer.writerow([provincia, city, name, address, phone])
+        writer.writerow(["Provincia", "Localidad", "Nombre", "Dirección", "Teléfono", "Correo", "Sitio Web", "Rating"])
 
-def process_city(provincia, city):
-    """Procesa una ciudad completa, incluyendo paginación y detalles."""
-    print(f"  Procesando ciudad: {city} en {provincia}")
-    page_token = None
-    total_results = 0
+        for localidad in localidades:
+            resultados = buscar_repuestos(localidad["localidad"], localidad["provincia"], API_KEY, BUSQUEDA)
+            cursor = conn.cursor()
 
-    while total_results < 800:
-        # Buscar lugares
-        response_data = fetch_places(query, city, page_token)
-
-        if "results" not in response_data:
-            print(f"    No se encontraron resultados para {city}.")
-            break
-
-        for place in response_data["results"]:
-            place_id = place["place_id"]
-
-            if place_id in processed_place_ids:
+            if not resultados:
+                cursor.execute("UPDATE localidades SET procesado = 1 WHERE id = %s", (localidad["id"],))
+                conn.commit()
+                cursor.close()
                 continue
 
-            # Marcar el lugar como procesado
-            processed_place_ids.add(place_id)
+            for res in resultados:
+                detalles = obtener_detalles(res["place_id"], API_KEY)
+                writer.writerow([
+                    localidad["provincia"],
+                    localidad["localidad"],
+                    detalles.get("name", res.get("name", "")),
+                    detalles.get("formatted_address", res.get("formatted_address", "")),
+                    detalles.get("formatted_phone_number", ""),
+                    detalles.get("email", ""),
+                    detalles.get("website", ""),
+                    detalles.get("rating", res.get("rating", ""))
+                ])
+            
+            cursor.execute("UPDATE localidades SET procesado = 1 WHERE id = %s", (localidad["id"],))
+            conn.commit()
+            cursor.close()
+            print(f"✅ Localidad procesada: {localidad['localidad']}")
+            time.sleep(2)
+    
+    conn.close()
+    print(f"✅ Extracción completada. Datos guardados en {output_csv}.")
 
-            # Obtener detalles del lugar
-            details_response = fetch_place_details(place_id)
-            result = details_response.get("result", {})
+# Programar ejecución diaria a las 11:37 PM
+schedule.every().day.at("11:37").do(procesar_localidades)
 
-            # Extraer información
-            name = result.get("name")
-            address = result.get("formatted_address")
-            phone = result.get("formatted_phone_number")
-
-            # Solo guardar si hay teléfono
-            if phone:
-                save_to_csv(provincia, city, name, address, phone)
-                total_results += 1
-
-            if total_results >= 800:
-                break
-
-        # Manejar la paginación
-        page_token = response_data.get("next_page_token")
-        if not page_token:
-            break
-
-        # Esperar para cumplir con las políticas de Google
-        time.sleep(2)
-
-def process_province(provincia, cities):
-    """Procesa una provincia completa iterando por sus ciudades."""
-    print(f"Procesando provincia: {provincia}")
-    for city in cities:
-        process_city(provincia, city)
-
-# Procesar cada provincia
-for provincia, cities in provincias_ciudades.items():
-    process_province(provincia, cities)
-
-print("Proceso completado. Los resultados se guardaron en el archivo CSV.")
+print("⏳ Job iniciado. Ejecutando diariamente a las 11:37 PM...")
+while True:
+    schedule.run_pending()
+    time.sleep(60)
